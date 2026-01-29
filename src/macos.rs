@@ -361,6 +361,7 @@ fn parse_proxyauto_from_dict(cfd: &CFDictionary<CFString, CFType>) -> Result<Aut
         .unwrap_or_default();
 
     let url = if url == "\"\"" { String::new() } else { url };
+    let enable = enable && !url.is_empty();
 
     Ok(Autoproxy { enable, url })
 }
@@ -402,7 +403,7 @@ fn read_port(cfd: &CFDictionary<CFString, CFType>, key: &'static str) -> u16 {
     get_proxy_value(cfd, key)
         .and_then(|x| x.downcast::<CFNumber>())
         .and_then(|num| num.to_i32())
-        .filter(|v| *v >= 0)
+        .filter(|v| (0..=u16::MAX as i32).contains(v))
         .map_or(0, |v| v as u16)
 }
 
@@ -568,6 +569,27 @@ fn parse_proxy_negative_port_zeroed() {
 }
 
 #[test]
+fn parse_proxy_too_large_port_zeroed() {
+    let dict = CFDictionary::from_CFType_pairs(&[
+        (
+            CFString::from_static_string("HTTPEnable"),
+            CFNumber::from(1).as_CFType(),
+        ),
+        (
+            CFString::from_static_string("HTTPProxy"),
+            CFString::from_static_string("localhost").as_CFType(),
+        ),
+        (
+            CFString::from_static_string("HTTPPort"),
+            CFNumber::from(i32::MAX).as_CFType(),
+        ),
+    ]);
+    let proxy = parse_proxies_from_dict(&dict, ProxyType::Http).unwrap();
+    assert!(!proxy.enable);
+    assert_eq!(proxy.port, 0);
+}
+
+#[test]
 fn parse_bypass_missing_returns_empty() {
     let dict: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&[]);
     let bypass = parse_bypass_from_dict(&dict).unwrap();
@@ -577,6 +599,17 @@ fn parse_bypass_missing_returns_empty() {
 #[test]
 fn parse_proxyauto_defaults_to_false_and_empty_url() {
     let dict: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&[]);
+    let auto = parse_proxyauto_from_dict(&dict).unwrap();
+    assert!(!auto.enable);
+    assert_eq!(auto.url, "");
+}
+
+#[test]
+fn parse_proxyauto_disable_when_url_missing() {
+    let dict = CFDictionary::from_CFType_pairs(&[(
+        CFString::from_static_string("ProxyAutoConfigEnable"),
+        CFNumber::from(1).as_CFType(),
+    )]);
     let auto = parse_proxyauto_from_dict(&dict).unwrap();
     assert!(!auto.enable);
     assert_eq!(auto.url, "");
