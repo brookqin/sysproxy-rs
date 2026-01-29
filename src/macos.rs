@@ -337,23 +337,16 @@ fn parse_proxies_from_dict(
     cfd: &CFDictionary<CFString, CFType>,
     proxy_type: ProxyType,
 ) -> Result<Sysproxy> {
-    let enable = get_proxy_value(cfd, proxy_type.as_enable())
-        .and_then(|x| x.downcast::<CFNumber>())
-        .and_then(|num| num.to_i32())
-        .map(|v| v != 0)
-        .ok_or_else(|| Error::ParseStr("Unable to parse enable from CSP".into()))?;
-    let port = get_proxy_value(cfd, proxy_type.as_port())
-        .and_then(|x| x.downcast::<CFNumber>())
-        .and_then(|num| num.to_i32())
-        .ok_or_else(|| Error::ParseStr("Unable to parse port from CSP".into()))?;
-    let host = get_proxy_value(cfd, proxy_type.as_host())
-        .and_then(|x| x.downcast::<CFString>().map(|s| s.to_string()))
-        .ok_or_else(|| Error::ParseStr("Unable to parse host from CSP".into()))?;
+    let enable = read_bool_flag(cfd, proxy_type.as_enable());
+    let port = read_port(cfd, proxy_type.as_port());
+    let host = read_host(cfd, proxy_type.as_host());
+    let enable = enable && !host.is_empty() && port != 0;
+
     Ok(Sysproxy {
         enable,
         host,
-        port: port as u16,
-        bypass: "".into(),
+        port,
+        bypass: String::new(),
     })
 }
 
@@ -362,10 +355,10 @@ fn parse_proxyauto_from_dict(cfd: &CFDictionary<CFString, CFType>) -> Result<Aut
         .and_then(|x| x.downcast::<CFNumber>())
         .and_then(|num| num.to_i32())
         .map(|v| v != 0)
-        .ok_or_else(|| Error::ParseStr("Unable to parse auto proxy enable from CSP".into()))?;
+        .unwrap_or(false);
     let url = get_proxy_value(cfd, "ProxyAutoConfig RLString")
         .and_then(|x| x.downcast::<CFString>().map(|s| s.to_string()))
-        .ok_or_else(|| Error::ParseStr("Unable to parse auto proxy URL from CSP".into()))?;
+        .unwrap_or_default();
 
     let url = if url == "\"\"" { String::new() } else { url };
 
@@ -373,9 +366,11 @@ fn parse_proxyauto_from_dict(cfd: &CFDictionary<CFString, CFType>) -> Result<Aut
 }
 
 fn parse_bypass_from_dict(cfd: &CFDictionary<CFString, CFType>) -> Result<Vec<String>> {
-    let bypass_list_raw = get_proxy_value(cfd, "ExceptionsList")
-        .and_then(|x| x.downcast::<CFArray>())
-        .ok_or_else(|| Error::ParseStr("Unable to parse bypass list".into()))?;
+    let Some(bypass_list_raw) =
+        get_proxy_value(cfd, "ExceptionsList").and_then(|x| x.downcast::<CFArray>())
+    else {
+        return Ok(Vec::new());
+    };
 
     let mut bypass_list = Vec::with_capacity(bypass_list_raw.len() as usize);
     for bypass_raw in &bypass_list_raw {
@@ -394,6 +389,27 @@ fn get_proxy_value<'a>(
 ) -> Option<ItemRef<'a, CFType>> {
     let cf_key = CFString::from_static_string(key);
     dict.find(&cf_key)
+}
+
+fn read_bool_flag(cfd: &CFDictionary<CFString, CFType>, key: &'static str) -> bool {
+    get_proxy_value(cfd, key)
+        .and_then(|x| x.downcast::<CFNumber>())
+        .and_then(|num| num.to_i32())
+        .is_some_and(|v| v != 0)
+}
+
+fn read_port(cfd: &CFDictionary<CFString, CFType>, key: &'static str) -> u16 {
+    get_proxy_value(cfd, key)
+        .and_then(|x| x.downcast::<CFNumber>())
+        .and_then(|num| num.to_i32())
+        .filter(|v| *v >= 0)
+        .map_or(0, |v| v as u16)
+}
+
+fn read_host(cfd: &CFDictionary<CFString, CFType>, key: &'static str) -> String {
+    get_proxy_value(cfd, key)
+        .and_then(|x| x.downcast::<CFString>().map(|s| s.to_string()))
+        .unwrap_or_default()
 }
 
 // #[allow(dead_code)]
@@ -516,4 +532,52 @@ fn test_set_bypass() {
         assert!(matches!(e, Error::RequiresAdminPrivileges));
         assert!(!Sysproxy::has_permission());
     }
+}
+
+#[test]
+fn parse_proxy_missing_fields_disable_proxy() {
+    let dict = CFDictionary::from_CFType_pairs(&[(
+        CFString::from_static_string("HTTPEnable"),
+        CFNumber::from(1).as_CFType(),
+    )]);
+    let proxy = parse_proxies_from_dict(&dict, ProxyType::Http).unwrap();
+    assert!(!proxy.enable);
+    assert_eq!(proxy.host, "");
+    assert_eq!(proxy.port, 0);
+}
+
+#[test]
+fn parse_proxy_negative_port_zeroed() {
+    let dict = CFDictionary::from_CFType_pairs(&[
+        (
+            CFString::from_static_string("HTTPEnable"),
+            CFNumber::from(1).as_CFType(),
+        ),
+        (
+            CFString::from_static_string("HTTPProxy"),
+            CFString::from_static_string("localhost").as_CFType(),
+        ),
+        (
+            CFString::from_static_string("HTTPPort"),
+            CFNumber::from(-1).as_CFType(),
+        ),
+    ]);
+    let proxy = parse_proxies_from_dict(&dict, ProxyType::Http).unwrap();
+    assert!(!proxy.enable);
+    assert_eq!(proxy.port, 0);
+}
+
+#[test]
+fn parse_bypass_missing_returns_empty() {
+    let dict: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&[]);
+    let bypass = parse_bypass_from_dict(&dict).unwrap();
+    assert!(bypass.is_empty());
+}
+
+#[test]
+fn parse_proxyauto_defaults_to_false_and_empty_url() {
+    let dict: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&[]);
+    let auto = parse_proxyauto_from_dict(&dict).unwrap();
+    assert!(!auto.enable);
+    assert_eq!(auto.url, "");
 }
