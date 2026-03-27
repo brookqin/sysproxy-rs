@@ -15,6 +15,7 @@ use system_configuration::{
     sys::network_configuration::{
         SCNetworkProtocolGetConfiguration, SCNetworkServiceCopy, SCNetworkServiceCopyProtocol,
     },
+    sys::preferences::{SCPreferencesLock, SCPreferencesUnlock},
 };
 use system_configuration::{
     core_foundation::{
@@ -211,16 +212,14 @@ impl Sysproxy {
 
     #[inline]
     pub fn has_permission() -> bool {
-        let check = || -> Result<()> {
-            let service = get_active_network_service()?.to_string();
-            run_networksetup(&["-setwebproxystate", &service, "off"])?;
-            Ok(())
-        };
-
-        match check() {
-            Ok(_) => true,
-            Err(e) => {
-                debug!("Permission check failed: {:?}", e);
+        let scp = SCPreferences::default(&CFString::new("sysproxy-rs"));
+        unsafe {
+            let locked = SCPreferencesLock(scp.as_concrete_TypeRef(), 0);
+            if locked != 0 {
+                SCPreferencesUnlock(scp.as_concrete_TypeRef());
+                true
+            } else {
+                debug!("Permission check failed: SCPreferencesLock returned false");
                 false
             }
         }
